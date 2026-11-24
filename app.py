@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, date
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory, session, abort
+from flask import Flask, jsonify, request, send_from_directory, session, abort, redirect
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import db as dbm
@@ -170,6 +170,9 @@ def student_stats(u):
 
 @app.get("/")
 def index():
+    # Di Vercel, folder public/ disajikan CDN (tidak ikut ke Flask) -> arahkan ke /index.html
+    if not (FRONTEND / "index.html").is_file():
+        return redirect("/index.html")
     return send_from_directory(FRONTEND, "index.html")
 
 
@@ -180,6 +183,8 @@ def static_files(p):
     f = FRONTEND / p
     if f.is_file():
         return send_from_directory(FRONTEND, p)
+    if not (FRONTEND / "index.html").is_file():
+        return redirect("/index.html")
     return send_from_directory(FRONTEND, "index.html")
 
 # ================================================================= auth & daftar
