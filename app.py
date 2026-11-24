@@ -1,6 +1,6 @@
 """
 ARKA — backend API (Flask + SQLite)
-
+ 
 Jalankan:  python app.py   ->  http://localhost:5000
 Akun demo dibuat oleh seed.py (lihat README).
 """
@@ -11,26 +11,26 @@ import secrets
 from datetime import datetime, timedelta, date
 from functools import wraps
 from pathlib import Path
-
+ 
 from flask import Flask, jsonify, request, send_from_directory, session, abort, redirect
 from werkzeug.security import check_password_hash, generate_password_hash
-
+ 
 import db as dbm
 from db import q, x
 import engine
 from data import TESTS, RIASEC
-
+ 
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "public"   # di Vercel folder public/ disajikan langsung oleh CDN
 POLICY_VERSION = "v1.0-2026-11"
 DEMO_MODE = os.environ.get("ARKA_DEMO", "1") == "1"   # tampilkan kotak surat simulasi
-
+ 
 app = Flask(__name__, static_folder=None)
-
-
+ 
+ 
 ON_VERCEL = bool(os.environ.get("VERCEL"))
-
-
+ 
+ 
 def _secret_key():
     if os.environ.get("ARKA_SECRET"):
         return os.environ["ARKA_SECRET"]
@@ -40,23 +40,23 @@ def _secret_key():
     if not f.exists():
         f.write_text(secrets.token_hex(32))
     return f.read_text().strip()
-
-
+ 
+ 
 app.config.update(SECRET_KEY=_secret_key(), SESSION_COOKIE_HTTPONLY=True,
                   SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=timedelta(days=7),
                   JSON_SORT_KEYS=False)
 app.teardown_appcontext(dbm.close_db)
-
+ 
 # ================================================================= helpers
-
+ 
 def now():
     return datetime.now().isoformat(timespec="seconds")
-
-
+ 
+ 
 def err(msg, code=400, **extra):
     return jsonify({"error": msg, **extra}), code
-
-
+ 
+ 
 def age_of(birth):
     try:
         b = date.fromisoformat(birth)
@@ -64,31 +64,31 @@ def age_of(birth):
         return None
     t = date.today()
     return t.year - b.year - ((t.month, t.day) < (b.month, b.day))
-
-
+ 
+ 
 def current_user():
     uid = session.get("uid")
     if not uid:
         return None
     u = q("SELECT * FROM users WHERE id=? AND status!='deleted'", (uid,), one=True)
     return u
-
-
+ 
+ 
 def log_event(user, name):
     """Event analitik: hanya ID pseudonim, jenis, waktu (Bab 7)."""
     x("INSERT INTO events(pseudo_id, event) VALUES(?,?)", (user["pseudo_id"], name))
-
-
+ 
+ 
 def audit(actor, action, target, allowed):
     x("INSERT INTO audit_log(actor_id, action, target, allowed, ip) VALUES(?,?,?,?,?)",
       (actor["id"] if actor else None, action, target, 1 if allowed else 0, request.remote_addr))
-
-
+ 
+ 
 def send_mail(to, subject, body, link=None):
     """Mode demo: simpan ke outbox. Produksi: ganti dengan layanan email/WA."""
     x("INSERT INTO outbox(to_contact, subject, body, link) VALUES(?,?,?,?)", (to, subject, body, link))
-
-
+ 
+ 
 def need(*roles, active=False):
     def deco(fn):
         @wraps(fn)
@@ -106,8 +106,8 @@ def need(*roles, active=False):
             return fn(u, *a, **kw)
         return wrapper
     return deco
-
-
+ 
+ 
 def public_user(u):
     school = q("SELECT id,name,city,invite_code FROM schools WHERE id=?", (u["school_id"],), one=True) if u["school_id"] else None
     out = {k: u[k] for k in ("id", "role", "name", "nickname", "email", "birth_date", "gender", "city",
@@ -120,9 +120,9 @@ def public_user(u):
         out["consent"] = c
         out["consent_expired"] = bool(c and c["expires_at"] < now())
     return out
-
+ 
 # ----------------------------------------------------------- data siswa
-
+ 
 def completed_results(uid):
     """Hasil terbaru per asesmen yang selesai."""
     rs = q("""SELECT test_key, result, completed_at FROM assessment_attempts
@@ -131,21 +131,21 @@ def completed_results(uid):
     for r in rs:
         out[r["test_key"]] = r["result"]
     return out
-
-
+ 
+ 
 def last_completion(uid):
     r = q("SELECT MAX(completed_at) AS m FROM assessment_attempts WHERE user_id=? AND status='completed'", (uid,), one=True)
     return r["m"] if r else None
-
-
+ 
+ 
 def all_careers():
     return q("SELECT * FROM careers")
-
-
+ 
+ 
 def all_majors():
     return q("SELECT * FROM majors")
-
-
+ 
+ 
 def current_roadmap(uid):
     r = q("SELECT * FROM roadmaps WHERE user_id=? AND is_current=1 ORDER BY id DESC LIMIT 1", (uid,), one=True)
     if not r:
@@ -156,8 +156,8 @@ def current_roadmap(uid):
     r["progress"] = round(sum(1 for t in tasks if t["done"]) / len(tasks) * 100) if tasks else 0
     r["based_on"] = json.loads(r["based_on"])
     return r
-
-
+ 
+ 
 def student_stats(u):
     res = completed_results(u["id"])
     rd = current_roadmap(u["id"])
@@ -165,41 +165,61 @@ def student_stats(u):
     score = engine.readiness(len(res), bool(rd and rd["is_saved"]), pct, u["last_active_at"])
     tags = engine.priority_tags(score, len(res), u["last_active_at"])
     return res, rd, score, tags
-
+ 
 # ================================================================= static
-
+ 
+def find_frontend_file(p):
+    """Cari file tampilan. Mendukung 2 susunan:
+    1) rapi:  public/index.html, public/js/logic.js, ...
+    2) datar: index.html, logic.js, app.css, logo.png di folder yang sama dengan app.py
+    """
+    here = Path(__file__).resolve().parent
+    name = Path(p).name
+    for base in (FRONTEND, here / "public", here, ROOT):
+        for cand in (base / p, base / name):
+            if cand.is_file():
+                return cand
+    return None
+ 
+ 
+MISSING_FRONTEND = ("File tampilan (index.html, template.html, logic.js, runtime.js, app.css, logo.png) "
+                    "tidak ditemukan di server. Pastikan file-file itu ikut di-upload.")
+ 
+ 
+def send_front(p):
+    f = find_frontend_file(p)
+    if not f:
+        return None
+    return send_from_directory(f.parent, f.name)
+ 
+ 
 @app.get("/")
 def index():
-    # Di Vercel, folder public/ disajikan CDN (tidak ikut ke Flask) -> arahkan ke /index.html
-    if not (FRONTEND / "index.html").is_file():
-        return redirect("/index.html")
-    return send_from_directory(FRONTEND, "index.html")
-
-
+    return send_front("index.html") or (MISSING_FRONTEND, 500)
+ 
+ 
 @app.get("/<path:p>")
 def static_files(p):
     if p.startswith("api/"):
         abort(404)
-    f = FRONTEND / p
-    if f.is_file():
-        return send_from_directory(FRONTEND, p)
-    if not (FRONTEND / "index.html").is_file():
-        return redirect("/index.html")
-    return send_from_directory(FRONTEND, "index.html")
-
+    if p.endswith((".py", ".pyc", ".db", ".sql")) or Path(p).name.startswith("."):
+        abort(404)   # jangan sajikan kode/database
+    return send_front(p) or send_front("index.html") or (MISSING_FRONTEND, 500)
+ 
+ 
 # ================================================================= auth & daftar
-
+ 
 @app.get("/api/schools")
 def schools():
     return jsonify(q("SELECT id, name, city FROM schools ORDER BY name"))
-
-
+ 
+ 
 @app.get("/api/schools/by-invite/<code>")
 def school_by_invite(code):
     s = q("SELECT id, name, city FROM schools WHERE invite_code=?", (code,), one=True)
     return jsonify(s) if s else err("Kode undangan tidak ditemukan.", 404)
-
-
+ 
+ 
 def _new_consent(student, parent_name, parent_contact):
     x("UPDATE consents SET status='superseded' WHERE student_id=? AND status='pending'", (student["id"],))
     token = secrets.token_urlsafe(24)
@@ -214,11 +234,11 @@ def _new_consent(student, parent_name, parent_contact):
               f"Buka tautan berikut dan masukkan kode verifikasi: {code}\nTautan berlaku 7 hari.",
               link)
     return token
-
-
+ 
+ 
 ROLE_MAP = {"siswa": "siswa", "guru_bk": "guru_bk", "kepala_sekolah": "kepsek", "kepsek": "kepsek"}
-
-
+ 
+ 
 @app.post("/api/auth/register")
 def register():
     """Formulir daftar prototipe: nama, email, password, konfirmasi, daftar sebagai."""
@@ -246,8 +266,8 @@ def register():
     session.permanent = True
     session["uid"] = uid
     return jsonify({"user": public_user(u)})
-
-
+ 
+ 
 @app.post("/api/auth/login")
 def login():
     d = request.get_json(force=True) or {}
@@ -263,20 +283,20 @@ def login():
     if u["role"] == "guru_bk":
         log_event(u, "dashboard_opened")
     return jsonify({"user": public_user(u)})
-
-
+ 
+ 
 @app.post("/api/auth/logout")
 def logout():
     session.clear()
     return jsonify({"ok": True})
-
-
+ 
+ 
 @app.get("/api/me")
 def me():
     u = current_user()
     return jsonify({"user": public_user(u) if u else None, "demo": DEMO_MODE})
-
-
+ 
+ 
 @app.post("/api/consent/resend")
 @need("siswa")
 def consent_resend(u):
@@ -288,8 +308,8 @@ def consent_resend(u):
         return err("Isi nama dan kontak orang tua/wali.")
     _new_consent(u, pn, pc)
     return jsonify({"ok": True})
-
-
+ 
+ 
 @app.get("/api/consent/<token>")
 def consent_view(token):
     c = q("SELECT * FROM consents WHERE token=?", (token,), one=True)
@@ -314,8 +334,8 @@ def consent_view(token):
                    "Data tidak dijual dan tidak dipakai untuk iklan"],
         "expires_at": c["expires_at"],
     })
-
-
+ 
+ 
 @app.post("/api/consent/<token>")
 def consent_decide(token):
     d = request.get_json(force=True) or {}
@@ -345,16 +365,16 @@ def consent_decide(token):
         x("INSERT INTO deletion_requests(user_id, code, status, confirmed_at, purge_after) VALUES(?,?,?,?,?)",
           (stu["id"], "-", "confirmed", now(), purge))
     return jsonify({"ok": True, "status": "approved" if decision == "approve" else "rejected"})
-
-
+ 
+ 
 @app.get("/api/dev/outbox")
 def outbox():
     if not DEMO_MODE:
         abort(404)
     return jsonify(q("SELECT * FROM outbox ORDER BY id DESC LIMIT 30"))
-
+ 
 # ================================================================= onboarding & pengaturan
-
+ 
 def school_from_name(name):
     """Cocokkan nama sekolah ketikan pengguna; buat baru bila belum ada."""
     name = (name or "").strip()
@@ -365,8 +385,8 @@ def school_from_name(name):
         return r["id"]
     code = "".join(ch for ch in name.upper() if ch.isalnum())[:10] + "-" + secrets.token_hex(2).upper()
     return x("INSERT INTO schools(name, city, invite_code) VALUES(?,?,?)", (name, "-", code))
-
-
+ 
+ 
 @app.post("/api/onboarding")
 @need()
 def onboarding(u):
@@ -383,8 +403,8 @@ def onboarding(u):
        (d.get("city") or "").strip() or None, school_id, grade, class_name,
        json.dumps(interests), d.get("concern") or None, u["id"]))
     return jsonify({"user": public_user(q("SELECT * FROM users WHERE id=?", (u["id"],), one=True))})
-
-
+ 
+ 
 @app.patch("/api/settings")
 @need()
 def settings(u):
@@ -400,8 +420,8 @@ def settings(u):
     if fields:
         x(f"UPDATE users SET {', '.join(fields)} WHERE id=?", (*vals, u["id"]))
     return jsonify({"user": public_user(q("SELECT * FROM users WHERE id=?", (u["id"],), one=True))})
-
-
+ 
+ 
 @app.post("/api/survey")
 @need("siswa", active=True)
 def survey(u):
@@ -411,14 +431,14 @@ def survey(u):
     x("INSERT INTO clarity_surveys(user_id, phase, score) VALUES(?,?,?)", (u["id"], "followup", d["score"]))
     log_event(u, "clarity_survey_answered")
     return jsonify({"ok": True})
-
+ 
 # ================================================================= asesmen (FR-003, FR-004)
-
+ 
 def open_attempt(uid, key):
     return q("SELECT * FROM assessment_attempts WHERE user_id=? AND test_key=? AND status='in_progress' ORDER BY id DESC LIMIT 1",
              (uid, key), one=True)
-
-
+ 
+ 
 @app.get("/api/assessments")
 @need("siswa", active=True)
 def assessments(u):
@@ -433,8 +453,8 @@ def assessments(u):
                     "done": bool(last), "completed_at": last["completed_at"] if last else None,
                     "summary": last["result"]["summary"] if last else None})
     return jsonify(out)
-
-
+ 
+ 
 @app.get("/api/assessments/<key>")
 @need("siswa", active=True)
 def assessment_get(u, key):
@@ -448,8 +468,8 @@ def assessment_get(u, key):
     t = TESTS[key]
     return jsonify({"key": key, "name": t["name"], "framework": t["framework"], "items": t["items"],
                     "answers": op["answers"], "current_index": op["current_index"], "attempt_id": op["id"]})
-
-
+ 
+ 
 @app.put("/api/assessments/<key>/answers")
 @need("siswa", active=True)
 def assessment_save(u, key):
@@ -467,8 +487,8 @@ def assessment_save(u, key):
     idx = max(0, min(int(d.get("current_index", op["current_index"])), len(valid_ids) - 1))
     x("UPDATE assessment_attempts SET answers=?, current_index=? WHERE id=?", (json.dumps(answers), idx, op["id"]))
     return jsonify({"ok": True, "answered": len(answers)})
-
-
+ 
+ 
 @app.post("/api/assessments/<key>/complete")
 @need("siswa", active=True)
 def assessment_complete(u, key):
@@ -488,8 +508,8 @@ def assessment_complete(u, key):
     if n >= 2:
         log_event(u, "profile_generated")
     return jsonify({"result": result, "completed_count": n})
-
-
+ 
+ 
 @app.get("/api/assessments/<key>/result")
 @need("siswa", active=True)
 def assessment_result(u, key):
@@ -498,8 +518,8 @@ def assessment_result(u, key):
     if not rs:
         return err("Belum ada hasil.", 404)
     return jsonify({"key": key, "name": TESTS[key]["name"], "latest": rs[0], "history": rs[1:]})
-
-
+ 
+ 
 @app.post("/api/assessments/<key>/retake")
 @need("siswa", active=True)
 def assessment_retake(u, key):
@@ -509,15 +529,15 @@ def assessment_retake(u, key):
     x("INSERT INTO assessment_attempts(user_id, test_key) VALUES(?,?)", (u["id"], key))
     log_event(u, "assessment_started")
     return jsonify({"ok": True})
-
+ 
 # ================================================================= profil & roadmap (FR-004, FR-005, FR-011)
-
+ 
 @app.get("/api/profile")
 @need("siswa", active=True)
 def profile(u):
     return jsonify(engine.build_profile(completed_results(u["id"])))
-
-
+ 
+ 
 def _generate_roadmap(u):
     res = completed_results(u["id"])
     data, steps = engine.build_roadmap(u, res, all_careers(), all_majors())
@@ -528,8 +548,8 @@ def _generate_roadmap(u):
         x("INSERT INTO roadmap_steps(roadmap_id, idx, title, description, period, tasks, done) VALUES(?,?,?,?,?,?,?)",
           (rid, i, s["title"], s["description"], s["period"], json.dumps(s["tasks"]), 1 if s["done"] else 0))
     return current_roadmap(u["id"])
-
-
+ 
+ 
 @app.get("/api/roadmap")
 @need("siswa", active=True)
 def roadmap(u):
@@ -542,8 +562,8 @@ def roadmap(u):
         rd = _generate_roadmap(u)
     rd["outdated"] = sorted(res) != rd["based_on"]
     return jsonify({"available": True, "roadmap": rd, "profile_label": prof["label"]})
-
-
+ 
+ 
 @app.post("/api/roadmap/regenerate")
 @need("siswa", active=True)
 def roadmap_regen(u):
@@ -560,8 +580,8 @@ def roadmap_regen(u):
         if old["is_saved"]:
             x("UPDATE roadmaps SET is_saved=1, saved_at=? WHERE id=?", (now(), rd["id"]))
     return jsonify({"roadmap": current_roadmap(u["id"])})
-
-
+ 
+ 
 @app.post("/api/roadmap/save")
 @need("siswa", active=True)
 def roadmap_save(u):
@@ -572,8 +592,8 @@ def roadmap_save(u):
     x("UPDATE roadmaps SET is_saved=1, saved_at=? WHERE id=?", (now(), rd["id"]))
     log_event(u, "roadmap_saved")
     return jsonify({"ok": True, "first": first})
-
-
+ 
+ 
 @app.patch("/api/roadmap/steps/<int:sid>")
 @need("siswa", active=True)
 def roadmap_step(u, sid):
@@ -592,9 +612,9 @@ def roadmap_step(u, sid):
     if all_done and not s["done"]:
         log_event(u, "roadmap_step_completed")
     return jsonify({"roadmap": current_roadmap(u["id"])})
-
+ 
 # ================================================================= dashboard siswa
-
+ 
 @app.get("/api/dashboard")
 @need("siswa")
 def dashboard(u):
@@ -630,9 +650,9 @@ def dashboard(u):
                     "roadmap": {"progress": rd["progress"], "is_saved": bool(rd["is_saved"]),
                                 "steps_done": sum(1 for s in rd["steps"] if s["done"]), "steps_total": len(rd["steps"])} if rd else None,
                     "last_chat": last_msg, "next": nexts[:3], "careers": recs, "survey_due": survey_due})
-
+ 
 # ================================================================= AI Companion (FR-006, FR-007, FR-020)
-
+ 
 def chat_context(u):
     res = completed_results(u["id"])
     rd = current_roadmap(u["id"])
@@ -642,8 +662,8 @@ def chat_context(u):
             "ranked_majors": engine.rank(all_majors(), res) if res else all_majors(),
             "history": hist, "roadmap": rd["data"] if rd else None,
             "scholarships": q("SELECT * FROM scholarships")}
-
-
+ 
+ 
 @app.get("/api/chat")
 @need("siswa", active=True)
 def chat_get(u):
@@ -654,8 +674,8 @@ def chat_get(u):
                     GROUP BY s.id ORDER BY s.last_at DESC LIMIT 20""", (u["id"],))
     has_profile = len(completed_results(u["id"])) >= 2
     return jsonify({"messages": msgs, "sessions": sessions, "has_profile": has_profile})
-
-
+ 
+ 
 @app.post("/api/chat")
 @need("siswa", active=True)
 def chat_post(u):
@@ -671,7 +691,7 @@ def chat_post(u):
     else:
         sid = s["id"]
     x("UPDATE chat_sessions SET last_at=? WHERE id=?", (now(), sid))
-
+ 
     # FR-007: sinyal krisis -> layar bantuan, tanpa saran karier, isi pesan tidak disimpan
     if engine.is_crisis(text):
         x("INSERT INTO chat_messages(session_id,user_id,sender,text,kind) VALUES(?,?,?,?,?)",
@@ -684,7 +704,7 @@ def chat_post(u):
                 (sid, u["id"], "ai", reply, "crisis", "safety-rules-v1"))
         return jsonify({"crisis": True, "help": engine.HELP_LINES,
                         "message": {"id": mid, "sender": "ai", "text": reply, "sources": [], "kind": "crisis"}})
-
+ 
     x("INSERT INTO chat_messages(session_id,user_id,sender,text) VALUES(?,?,?,?)", (sid, u["id"], "user", text))
     ctx = chat_context(u)
     ctx["history"] = ctx["history"][:-1]   # tanpa pesan barusan
@@ -699,8 +719,8 @@ def chat_post(u):
             (sid, u["id"], "ai", rule["text"], json.dumps(rule["sources"]), rule["kind"], model))
     return jsonify({"crisis": False, "message": {"id": mid, "sender": "ai", "text": rule["text"],
                                                   "sources": rule["sources"], "kind": rule["kind"]}})
-
-
+ 
+ 
 @app.post("/api/chat/<int:mid>/feedback")
 @need("siswa", active=True)
 def chat_feedback(u, mid):
@@ -715,9 +735,9 @@ def chat_feedback(u, mid):
       (v, "queued" if v == "inaccurate" else None, mid))
     log_event(u, "ai_feedback_given")
     return jsonify({"ok": True})
-
+ 
 # ================================================================= direktori (FR-013)
-
+ 
 @app.get("/api/directory")
 @need("siswa", active=True)
 def directory(u):
@@ -740,8 +760,8 @@ def directory(u):
         items = engine.rank(items, res)
     suggestions = [] if items else ["teknologi", "kesehatan", "desain", "bisnis"]
     return jsonify({"items": items, "fields": fields, "sorted_by_match": sorted_by, "suggestions": suggestions})
-
-
+ 
+ 
 @app.get("/api/directory/<kind>/<int:iid>")
 @need("siswa", active=True)
 def directory_item(u, kind, iid):
@@ -762,9 +782,9 @@ def directory_item(u, kind, iid):
     else:
         it["related_careers"] = [c for c in all_careers() if it["name"] in c["majors"]]
     return jsonify(it)
-
+ 
 # ================================================================= hapus akun & ekspor (FR-010)
-
+ 
 @app.get("/api/account/export")
 @need()
 def account_export(u):
@@ -775,8 +795,8 @@ def account_export(u):
     resp = jsonify(data)
     resp.headers["Content-Disposition"] = "attachment; filename=data-arka.json"
     return resp
-
-
+ 
+ 
 @app.post("/api/account/delete/request")
 @need()
 def delete_request(u):
@@ -791,8 +811,8 @@ def delete_request(u):
               f"Ada permintaan menghapus akun ARKA milik {u['name']}. Kode konfirmasi: {code}. "
               "Abaikan email ini bila Anda tidak memintanya.")
     return jsonify({"ok": True, "sent_to": who})
-
-
+ 
+ 
 @app.post("/api/account/delete/confirm")
 @need()
 def delete_confirm(u):
@@ -806,8 +826,8 @@ def delete_confirm(u):
     log_event(u, "account_deletion_requested")
     session.clear()
     return jsonify({"ok": True, "purge_before": purge})
-
-
+ 
+ 
 def purge_due(conn):
     """Hapus permanen akun yang masa tunggunya habis (jalankan harian lewat cron)."""
     ids = [r[0] for r in conn.execute(
@@ -816,9 +836,9 @@ def purge_due(conn):
         conn.execute("DELETE FROM users WHERE id=?", (uid,))   # CASCADE ke asesmen, chat, roadmap, catatan
     conn.commit()
     return len(ids)
-
+ 
 # ================================================================= Guru BK (FR-008, FR-009, FR-014, FR-015)
-
+ 
 def short_label(key, r):
     if not r:
         return None
@@ -830,8 +850,8 @@ def short_label(key, r):
     if key == "nilai":
         return VA[r["top"][0]]
     return r.get("type")
-
-
+ 
+ 
 def bk_student_or_403(u, sid):
     s = q("SELECT * FROM users WHERE id=? AND role='siswa'", (sid,), one=True)
     if not s or s["school_id"] != u["school_id"] or s["status"] != "active":
@@ -839,8 +859,8 @@ def bk_student_or_403(u, sid):
         return None
     audit(u, "open_student", f"student:{sid}", True)
     return s
-
-
+ 
+ 
 @app.get("/api/bk/students")
 @need("guru_bk", "kepsek")
 def bk_students(u):
@@ -867,8 +887,8 @@ def bk_students(u):
     filtered.sort(key=lambda o: (-len(o["tags"]), o["score"]))
     school = q("SELECT name, invite_code FROM schools WHERE id=?", (u["school_id"],), one=True)
     return jsonify({"students": filtered, "classes": classes, "tags": all_tags, "stats": stats, "school": school})
-
-
+ 
+ 
 @app.get("/api/bk/students/<int:sid>")
 @need("guru_bk", "kepsek")
 def bk_student(u, sid):
@@ -888,8 +908,8 @@ def bk_student(u, sid):
         "roadmap": {"data": rd["data"], "progress": rd["progress"], "is_saved": bool(rd["is_saved"]),
                     "steps": [{"title": st["title"], "done": bool(st["done"]), "period": st["period"]} for st in rd["steps"]]} if rd else None,
     })
-
-
+ 
+ 
 @app.get("/api/bk/students/<int:sid>/summary")
 @need("guru_bk", "kepsek")
 def bk_summary(u, sid):
@@ -899,16 +919,16 @@ def bk_summary(u, sid):
     res, rd, score, tags = student_stats(s)
     prof = engine.build_profile(res)
     return jsonify(engine.counselor_summary(s, prof, rd, score, tags, last_completion(s["id"])))
-
-
+ 
+ 
 @app.get("/api/bk/students/<int:sid>/notes")
 @need("guru_bk", "kepsek")
 def bk_notes(u, sid):
     if not bk_student_or_403(u, sid):
         return err("Akses ditolak.", 403)
     return jsonify(q("SELECT id, text, created_at FROM counseling_notes WHERE student_id=? AND counselor_id=? ORDER BY id DESC", (sid, u["id"])))
-
-
+ 
+ 
 @app.post("/api/bk/students/<int:sid>/notes")
 @need("guru_bk", "kepsek")
 def bk_note_add(u, sid):
@@ -920,12 +940,12 @@ def bk_note_add(u, sid):
     x("INSERT INTO counseling_notes(student_id, counselor_id, text) VALUES(?,?,?)", (sid, u["id"], text[:4000]))
     log_event(u, "counseling_note_saved")
     return jsonify(q("SELECT id, text, created_at FROM counseling_notes WHERE student_id=? AND counselor_id=? ORDER BY id DESC", (sid, u["id"])))
-
+ 
 # ================================================================= laporan agregat (FR-018, FR-019)
-
+ 
 MIN_GROUP = 10
-
-
+ 
+ 
 @app.get("/api/report")
 @need("kepsek", "guru_bk")
 def report(u):
@@ -985,13 +1005,13 @@ def report(u):
     out["interests"] = [{**d_, "pct": round(d_["n"] / len(with_int) * 100) if with_int else 0} for d_ in dist]
     out["interests_n"] = len(with_int)
     return jsonify(out)
-
-
+ 
+ 
 # ================================================================= tambahan untuk alur prototipe
-
+ 
 DEMO_ACCOUNTS = {"guru_bk": "bk@harapan.sch.id", "siswa": "arya@siswa.id"}
-
-
+ 
+ 
 @app.post("/api/auth/demo-switch")
 @need()
 def demo_switch(u):
@@ -1005,8 +1025,8 @@ def demo_switch(u):
         return err("Akun demo tidak ditemukan.", 404)
     session["uid"] = t["id"]
     return jsonify({"user": public_user(t)})
-
-
+ 
+ 
 @app.get("/api/activity")
 @need("siswa")
 def activity(u):
@@ -1034,21 +1054,21 @@ def activity(u):
         {"text": f"Eksplorasi 5 profesi ({min(views, 5)}/5)", "done": views >= 5},
     ]
     return jsonify({"activities": acts[:6], "milestones": milestones, "bookings": booked})
-
-
+ 
+ 
 @app.get("/api/mentors")
 @need()
 def mentors(u):
     return jsonify(q("SELECT * FROM mentors ORDER BY rating DESC, id"))
-
-
+ 
+ 
 @app.get("/api/mentoring/bookings")
 @need("siswa")
 def bookings(u):
     return jsonify(q("""SELECT b.*, m.name AS mentor_name FROM mentor_bookings b JOIN mentors m ON m.id=b.mentor_id
                         WHERE b.user_id=? ORDER BY b.id DESC""", (u["id"],)))
-
-
+ 
+ 
 @app.post("/api/mentoring/bookings")
 @need("siswa")
 def booking_create(u):
@@ -1064,8 +1084,8 @@ def booking_create(u):
             (u["id"], m["id"], d["date"], d["time"], d.get("payment") or "QRIS"))
     log_event(u, "mentor_booked")
     return jsonify(q("SELECT * FROM mentor_bookings WHERE id=?", (bid,), one=True))
-
-
+ 
+ 
 @app.patch("/api/mentoring/bookings/<int:bid>")
 @need("siswa")
 def booking_update(u, bid):
@@ -1077,18 +1097,18 @@ def booking_update(u, bid):
       (d.get("status", b["status"]), d.get("notes", b["notes"]), d.get("rating", b["rating"]),
        d.get("review", b["review"]), bid))
     return jsonify(q("SELECT * FROM mentor_bookings WHERE id=?", (bid,), one=True))
-
-
+ 
+ 
 @app.get("/api/bk/overview")
 @need("guru_bk", "kepsek")
 def bk_overview(u):
     n = q("""SELECT COUNT(*) n FROM mentor_bookings b JOIN users s ON s.id=b.user_id
              WHERE s.school_id=? AND b.created_at >= date('now','start of month')""", (u["school_id"],), one=True)["n"]
     return jsonify({"mentoring_month": n})
-
-
+ 
+ 
 # ================================================================= main
-
+ 
 def ensure_db():
     if not dbm.DB_PATH.exists():
         import seed
@@ -1096,10 +1116,14 @@ def ensure_db():
     with dbm.connect() as c:
         dbm.init_schema(c)
         purge_due(c)
-
-
+ 
+ 
+if ON_VERCEL:
+    ensure_db()
+ 
 if __name__ == "__main__":
     ensure_db()
     port = int(os.environ.get("PORT", 5000))
     print(f"\n  ARKA berjalan di http://localhost:{port}\n")
     app.run(host="0.0.0.0", port=port, debug=os.environ.get("FLASK_DEBUG") == "1")
+ 
